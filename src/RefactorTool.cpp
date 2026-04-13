@@ -7,6 +7,7 @@
 #include "clang/Tooling/Tooling.h"
 #include "llvm/Support/CommandLine.h"
 
+#include <clang/Basic/AttrKinds.h>
 #include <unordered_set>
 
 #include "RefactorTool.h"
@@ -28,7 +29,8 @@ void RefactorHandler::run(const MatchFinder::MatchResult &Result) {
         handle_nv_dtor(Dtor, Diag, SM);
     }
 
-    if (const auto *Method = Result.Nodes.getNodeAs<CXXMethodDecl>("methodDecl");
+    // Обработка совпадения с матчем типа "метод без override"
+    if (const auto *Method = Result.Nodes.getNodeAs<CXXMethodDecl>("missOverride");
         Method && Method->size_overridden_methods() > 0 && !Method->hasAttr<OverrideAttr>()) {
         handle_miss_override(Method, Diag, SM);
     }
@@ -38,25 +40,25 @@ void RefactorHandler::run(const MatchFinder::MatchResult &Result) {
     }
 }
 
-// Обрабатывает матчер случая невиртуального деструктора
+// Обрабатывает матчер типа "невиртуальный деструктор"
 void RefactorHandler::handle_nv_dtor(const CXXDestructorDecl *Dtor, DiagnosticsEngine &Diag, SourceManager &SM) {
     if (!Dtor)
         return;
 
-    // Проверяем, что деструктор находится в основном файле и не входит в системные заголовки
-    auto StartDtorLoc = Dtor->getLocation();  // позиция начала деструктора (тильды)
-    if (!SM.isInMainFile(StartDtorLoc) || SM.isInSystemHeader(StartDtorLoc)) {
+    // Проверяем валидность сматченного деструктора (не в макросе и физически записан в основном файле)
+    auto DtorLoc = Dtor->getLocation();  // позиция начала деструктора (тильды)
+    if (DtorLoc.isInvalid() || DtorLoc.isMacroID() || !SM.isWrittenInMainFile(DtorLoc)) {
         return;
     }
 
     // Проверяем, что раньше не обрабатывали этот деструктор (может повторно матчиться)
-    unsigned LocId = StartDtorLoc.getRawEncoding();  // уникальный id позиции начала деструктора
+    unsigned LocId = DtorLoc.getRawEncoding();  // уникальный id позиции начала деструктора
     if (virtualDtorLocations.count(LocId)) {
         return;  // деструктор уже обработан, выходим без изменений
     }
 
     // Вставляем "virtual " перед началом деструктора (false - успех, true - ошибка)
-    if (Rewrite.InsertTextBefore(StartDtorLoc, "virtual "))
+    if (Rewrite.InsertTextBefore(DtorLoc, "virtual "))
         return;  // вставка не удалась, выходим без изменений
 
     // Запоминаем, что уже обработали этот деструктор
@@ -67,9 +69,45 @@ void RefactorHandler::handle_nv_dtor(const CXXDestructorDecl *Dtor, DiagnosticsE
     Diag.Report(Dtor->getLocation(), DiagID);
 }
 
-// todo: необходимо реализовать обработку случая отсутствие override
+// Обрабатывает матчер типа "метод без override"
 void RefactorHandler::handle_miss_override(const CXXMethodDecl *Method, DiagnosticsEngine &Diag, SourceManager &SM) {
-    // Реализуйте Ваш код ниже
+    if (!Method)
+        return;
+
+    // Проверяем валидность сматченного метода (не в макросе и физически записан в основном файле)
+    auto MethodLoc = Method->getLocation();  // позиция начала метода
+    if (MethodLoc.isInvalid() || MethodLoc.isMacroID() || !SM.isWrittenInMainFile(MethodLoc)) {
+        return;
+    }
+
+    // Получаем общую карту типа метода (тип = сигнатура - имя)
+    TypeSourceInfo *TypeInfo = Method->getTypeSourceInfo();
+    if (!TypeInfo)
+        return;
+
+    // Из общей карты извлекаем объект с детальной инфой о типе функции (координаты скобок, аргументов и спецификаторов)
+    FunctionTypeLoc FuncType = TypeInfo->getTypeLoc().IgnoreParens().getAs<FunctionTypeLoc>();
+    if (FuncType.isNull())
+        return;  // извлечение не удалось, выходим без изменений
+
+    // Проверяем валидность сигнатуры метода (наличие правой скобки)
+    SourceLocation RParenLoc = FuncType.getRParenLoc();
+    if (RParenLoc.isInvalid())
+        return;
+
+    // === Определяем точку вставки " override" ===
+    // а) определяем начало последнего токена сигнатуры (у const это будет "c")
+    auto InsertLoc = FuncType.getLocalRangeEnd();
+    // б) получаем стандарт С++ из контекста проекта (для правильной трактовки токенов)
+    const auto &LangOpts = Method->getASTContext().getLangOpts();
+    // в) определяем позицию после конца последнего токена сигнатуры (у const - после "t")
+    InsertLoc = clang::Lexer::getLocForEndOfToken(InsertLoc, 0, SM, LangOpts);
+
+    // Вставляем " override" в найденную позицию (false - успех, true - ошибка)
+    if (Rewrite.InsertTextBefore(InsertLoc, " override")) {
+        return;  // вставка не удалась, выходим без изменений
+    }
+
     const unsigned DiagID = Diag.getCustomDiagID(DiagnosticsEngine::Remark, "Объявлен метод");
     Diag.Report(Method->getLocation(), DiagID);
 }
@@ -91,19 +129,27 @@ void RefactorHandler::handle_crange_for(const VarDecl *LoopVar, DiagnosticsEngin
     }
 */
 
+// Narrowing матчер сущности, заданной явно и в текущем файле
+auto explicitInFile = allOf(unless(isImplicit()), isExpansionInMainFile());
+
 // Конструирует матчер для поиска невиртуальных деструкторов
 auto NvDtorMatcher() {
-    // Матчер класса, у которого есть невиртуальный явный деструктор (именуем его "nonVirtualDtor")
+    // Матчер класса, у которого есть невиртуальный деструктор (именуем его "nonVirtualDtor")
     auto classWithNvDtor =
-        cxxRecordDecl(has(cxxDestructorDecl(unless(isVirtual()), unless(isImplicit())).bind("nonVirtualDtor")));
+        cxxRecordDecl(has(cxxDestructorDecl(explicitInFile, unless(isVirtual())).bind("nonVirtualDtor")));
 
-    // Возвращаем матчер производного класса, который напрямую наследуется от classWithNvDtor и имеет определение
-    return cxxRecordDecl(isDirectlyDerivedFrom(classWithNvDtor), isDefinition());
+    // Возвращаем матчер класса, производного от classWithNvDtor и имеющего определение
+    return cxxRecordDecl(isDerivedFrom(classWithNvDtor), isDefinition());
 }
 
+// Конструирует матчер для поиска переопределенных методов без override
 auto NoOverrideMatcher() {
-    // todo: замените код ниже, на свою реализацию, необходимо реализовать матчеры для поиска методов без override
-    return cxxMethodDecl().bind("methodDecl");
+    // Narrowing матчер спецификатора override или final
+    auto virtSpec = anyOf(hasAttr(clang::attr::Override), hasAttr(clang::attr::Final));
+
+    // Возвращаем матчер переопределенного метода без override/final (исключаем деструкторы)
+    return cxxMethodDecl(explicitInFile, isOverride(), unless(virtSpec), unless(cxxDestructorDecl()))
+        .bind("missOverride");  // именуем его "missOverride"
 }
 
 auto NoRefConstVarInRangeLoopMatcher() {
