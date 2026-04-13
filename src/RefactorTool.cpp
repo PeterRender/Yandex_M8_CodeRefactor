@@ -23,7 +23,8 @@ void RefactorHandler::run(const MatchFinder::MatchResult &Result) {
     auto &Diag = Result.Context->getDiagnostics();
     auto &SM = *Result.SourceManager;  // Получаем SourceManager для проверки isInMainFile
 
-    if (const auto *Dtor = Result.Nodes.getNodeAs<CXXDestructorDecl>("classDecl")) {
+    // Обработка совпадения с матчем типа "невиртуальный деструктор"
+    if (const auto *Dtor = Result.Nodes.getNodeAs<CXXDestructorDecl>("nonVirtualDtor")) {
         handle_nv_dtor(Dtor, Diag, SM);
     }
 
@@ -37,9 +38,31 @@ void RefactorHandler::run(const MatchFinder::MatchResult &Result) {
     }
 }
 
-// todo: необходимо реализовать обработку случая невиртуального деструктора
+// Обрабатывает матчер случая невиртуального деструктора
 void RefactorHandler::handle_nv_dtor(const CXXDestructorDecl *Dtor, DiagnosticsEngine &Diag, SourceManager &SM) {
-    // Реализуйте Ваш код ниже
+    if (!Dtor)
+        return;
+
+    // Проверяем, что деструктор находится в основном файле и не входит в системные заголовки
+    auto StartDtorLoc = Dtor->getLocation();  // позиция начала деструктора (тильды)
+    if (!SM.isInMainFile(StartDtorLoc) || SM.isInSystemHeader(StartDtorLoc)) {
+        return;
+    }
+
+    // Проверяем, что раньше не обрабатывали этот деструктор (может повторно матчиться)
+    unsigned LocId = StartDtorLoc.getRawEncoding();  // уникальный id позиции начала деструктора
+    if (virtualDtorLocations.count(LocId)) {
+        return;  // деструктор уже обработан, выходим без изменений
+    }
+
+    // Вставляем "virtual " перед началом деструктора (false - успех, true - ошибка)
+    if (Rewrite.InsertTextBefore(StartDtorLoc, "virtual "))
+        return;  // вставка не удалась, выходим без изменений
+
+    // Запоминаем, что уже обработали этот деструктор
+    if (!virtualDtorLocations.insert(LocId).second)
+        return;
+
     const unsigned DiagID = Diag.getCustomDiagID(DiagnosticsEngine::Remark, "Объявлен деструктор");
     Diag.Report(Dtor->getLocation(), DiagID);
 }
@@ -67,9 +90,15 @@ void RefactorHandler::handle_crange_for(const VarDecl *LoopVar, DiagnosticsEngin
         return cxxRecordDecl().bind("classDecl");
     }
 */
+
+// Конструирует матчер для поиска невиртуальных деструкторов
 auto NvDtorMatcher() {
-    // todo: замените код ниже, на свою реализацию, необходимо реализовать матчеры для поиска невиртуальных деструкторов
-    return cxxDestructorDecl().bind("classDecl");
+    // Матчер класса, у которого есть невиртуальный явный деструктор (именуем его "nonVirtualDtor")
+    auto classWithNvDtor =
+        cxxRecordDecl(has(cxxDestructorDecl(unless(isVirtual()), unless(isImplicit())).bind("nonVirtualDtor")));
+
+    // Возвращаем матчер производного класса, который напрямую наследуется от classWithNvDtor и имеет определение
+    return cxxRecordDecl(isDirectlyDerivedFrom(classWithNvDtor), isDefinition());
 }
 
 auto NoOverrideMatcher() {
