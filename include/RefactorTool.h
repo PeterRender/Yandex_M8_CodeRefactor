@@ -7,6 +7,8 @@
 
 #include <unordered_set>
 
+// Класс-обработчик матчей
+// Получает найденные AST-узлы и правит код (вставляет virtual, override, &)
 class RefactorHandler : public clang::ast_matchers::MatchFinder::MatchCallback {
 public:
     explicit RefactorHandler(clang::Rewriter &Rewrite) : Rewrite(Rewrite) {}
@@ -31,6 +33,8 @@ private:
         virtualDtorLocations;  // Для хранения позиций деструкторов, к которым уже добавлен virtual
 };
 
+// Класс-потребитель AST
+// Регистрирует матчеры и запускает поиск проблемных узлов в коде
 class ComplexConsumer : public clang::ASTConsumer {
 public:
     // Конструктор принимает Rewriter для изменения кода.
@@ -43,12 +47,19 @@ private:
     clang::ast_matchers::MatchFinder Finder;  // MatchFinder для поиска узлов AST.
 };
 
+// Класс, управляющий рефакторингом
+// Запускает процесс анализа для каждого файла в проекте,
+// создает Rewriter и сохраняет изменения после обработки каждого файла
 class CodeRefactorAction : public clang::ASTFrontendAction {
 public:
-    // Returns our ASTConsumer per translation unit.
+    // Создает потребителя AST для каждого файла
     virtual std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(clang::CompilerInstance &CI,
                                                                   clang::StringRef file) override;
+
+    // Вызывается в начале обработки файла (инициализирует Rewriter)
     virtual bool BeginSourceFileAction(clang::CompilerInstance &CI) override;
+
+    // Вызывается в конце обработки файла (сохраняет изменения в файле)
     virtual void EndSourceFileAction() override;
 
 private:

@@ -10,6 +10,10 @@
   },
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "remoteUser": "dev",
+  // Даем контейнеру полные права (для запуска perf)
+  "runArgs": [
+    "--privileged"
+  ],
   "postStartCommand": "conan profile detect || true",
   "customizations": {
     "vscode": {
