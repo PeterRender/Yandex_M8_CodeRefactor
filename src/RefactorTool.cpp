@@ -35,7 +35,8 @@ void RefactorHandler::run(const MatchFinder::MatchResult &Result) {
         handle_miss_override(Method, Diag, SM);
     }
 
-    if (const auto *LoopVar = Result.Nodes.getNodeAs<VarDecl>("VarDecl")) {
+    // Обработка совпадения с матчем типа "бессылочная переменная цикла range-for"
+    if (const auto *LoopVar = Result.Nodes.getNodeAs<VarDecl>("loopVar")) {
         handle_crange_for(LoopVar, Diag, SM);
     }
 }
@@ -100,7 +101,7 @@ void RefactorHandler::handle_miss_override(const CXXMethodDecl *Method, Diagnost
     auto InsertLoc = FuncType.getLocalRangeEnd();
     // б) получаем стандарт С++ из контекста проекта (для правильной трактовки токенов)
     const auto &LangOpts = Method->getASTContext().getLangOpts();
-    // в) определяем позицию после конца последнего токена сигнатуры (у const - после "t")
+    // в) смещаем позицию за конец последнего токена сигнатуры (у const - после "t")
     InsertLoc = clang::Lexer::getLocForEndOfToken(InsertLoc, 0, SM, LangOpts);
 
     // Вставляем " override" в найденную позицию (false - успех, true - ошибка)
@@ -112,22 +113,40 @@ void RefactorHandler::handle_miss_override(const CXXMethodDecl *Method, Diagnost
     Diag.Report(Method->getLocation(), DiagID);
 }
 
-// todo: необходимо реализовать обработку случая отсутствие & в range-for
+// Обрабатывает матчер типа "бессылочная переменная цикла range-for"
 void RefactorHandler::handle_crange_for(const VarDecl *LoopVar, DiagnosticsEngine &Diag, SourceManager &SM) {
-    // Реализуйте Ваш код ниже
+    if (!LoopVar)
+        return;
+
+    // Проверяем валидность сматченной переменной (не в макросе и физически записана в основном файле)
+    auto VarLoc = LoopVar->getLocation();
+    if (VarLoc.isInvalid() || VarLoc.isMacroID() || !SM.isWrittenInMainFile(VarLoc)) {
+        return;
+    }
+
+    // Получаем общую карту типа переменной
+    TypeSourceInfo *TypeInfo = LoopVar->getTypeSourceInfo();
+    if (!TypeInfo)
+        return;
+
+    // === Определяем точку вставки "&" ===
+    // а) определяем начало последнего токена в описании типа (у const auto это будет "a")
+    auto InsertLoc = TypeInfo->getTypeLoc().getEndLoc();
+    if (InsertLoc.isInvalid())
+        return;
+    // б) получаем стандарт С++ из контекста проекта (для правильной трактовки токенов)
+    const auto &LangOpts = LoopVar->getASTContext().getLangOpts();
+    // в) смещаем позицию за конец последнего токена типа (у const auto - после "o")
+    InsertLoc = clang::Lexer::getLocForEndOfToken(InsertLoc, 0, SM, LangOpts);
+
+    // Вставляем "&" в найденную позицию (false - успех, true - ошибка)
+    if (Rewrite.InsertTextBefore(InsertLoc, "&")) {
+        return;
+    }
+
     const unsigned DiagID = Diag.getCustomDiagID(DiagnosticsEngine::Remark, "Объявлена переменная");
     Diag.Report(LoopVar->getLocation(), DiagID);
 }
-
-// todo: ниже необходимо реализовать матчеры для поиска узлов AST
-// note: синтаксис написания матчеров точно такой же как и для использования clang-query
-/*
-    Пример того, как может выглядеть реализация:
-    auto AllClassesMatcher()
-    {
-        return cxxRecordDecl().bind("classDecl");
-    }
-*/
 
 // Narrowing матчер сущности, заданной явно и в текущем файле
 auto explicitInFile = allOf(unless(isImplicit()), isExpansionInMainFile());
@@ -152,9 +171,15 @@ auto NoOverrideMatcher() {
         .bind("missOverride");  // именуем его "missOverride"
 }
 
+// Конструирует матчер для поиска бессылочных переменных циклов range-for
 auto NoRefConstVarInRangeLoopMatcher() {
-    // todo: замените код ниже, на свою реализацию, необходимо реализовать матчеры для поиска range-for без &
-    return varDecl().bind("VarDecl");
+    // Narrowing матчер типа переменной цикла range-for
+    // Тип должен быть const, не быть &, а поcле раскрытия алиасов не быть ни встроенным типом, ни указателем, ни enum
+    auto varType = qualType(isConstQualified(), unless(referenceType()),
+                            hasCanonicalType(unless(anyOf(builtinType(), pointerType(), enumType()))));
+
+    // Возвращаем матчер цикла range-for с переменной, которая имеет тип varType (именуем ее "loopVar")
+    return cxxForRangeStmt(hasLoopVariable(varDecl(explicitInFile, hasType(varType)).bind("loopVar")));
 }
 
 // Конструктор принимает Rewriter для изменения кода.
