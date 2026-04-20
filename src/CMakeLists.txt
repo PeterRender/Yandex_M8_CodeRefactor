@@ -25,17 +25,26 @@
 set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_executable(refactor_tool RefactorTool.cpp)
-
-# Configure include directories for 'plugin'
-target_include_directories(
-  refactor_tool
-  PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include"
+# 1. Создаем библиотеку из логики
+add_library(refactor_tool_lib STATIC 
+    RefactorTool.cpp
 )
 
-target_link_libraries(refactor_tool PRIVATE clangTooling clangBasic clangASTMatchers)
+# 2. Настраиваем инклуды для библиотеки
+target_include_directories(
+    refactor_tool_lib
+    PUBLIC  # чтобы тесты тоже видели эти инклуды
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include"
+)
 
+# 3. Линкуем библиотеку с Clang
+target_link_libraries(refactor_tool_lib PUBLIC clangTooling clangBasic clangASTMatchers)
+
+# 4. Создаем исполняемый файл основного приложения
+add_executable(refactor_tool main.cpp)
+
+# 5. Линкуем исполняемый файл с библиотекой
+target_link_libraries(refactor_tool PRIVATE refactor_tool_lib)
 
 # # CONFIGURE THE PLUGIN LIBRARIES
 # # ==============================
